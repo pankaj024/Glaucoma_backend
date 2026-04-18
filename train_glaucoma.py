@@ -20,7 +20,15 @@ class GlaucomaTriageModel:
     def __init__(self, model_path='glaucoma_classifier.pkl'):
         print(f"Loading {DINOV2_MODEL}...")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL).to(self.device)
+        
+        # Robust loading to handle GitHub rate limits on shared hosting (Render)
+        try:
+            self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True).to(self.device)
+        except Exception as e:
+            print(f"Primary load failed, trying offline mode: {e}")
+            # Try to load from local cache if GitHub API is rate-limiting
+            self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True, source='local').to(self.device)
+            
         self.model.eval()
         
         self.transform = transforms.Compose([
