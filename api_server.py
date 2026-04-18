@@ -9,6 +9,7 @@ from PIL import Image
 import numpy as np
 import cv2
 import gc
+import traceback
 
 # Optimize PyTorch for low memory environments
 torch.set_num_threads(1)
@@ -102,8 +103,13 @@ def predict():
         return jsonify(metrics)
         
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"Error: {error_msg}")
+        traceback.print_exc()
+        return jsonify({
+            "error": error_msg,
+            "traceback": traceback.format_exc()
+        }), 500
 
 if __name__ == '__main__':
     # Disable debug mode and reloader for production (Render)
