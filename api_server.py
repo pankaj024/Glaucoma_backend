@@ -8,6 +8,10 @@ from io import BytesIO
 from PIL import Image
 import numpy as np
 import cv2
+import gc
+
+# Optimize PyTorch for low memory environments
+torch.set_num_threads(1)
 
 app = Flask(__name__)
 CORS(app)
@@ -19,6 +23,8 @@ def get_model():
     global model
     if model is None:
         model = GlaucomaTriageModel()
+        # Trigger garbage collection after loading model
+        gc.collect()
     return model
 
 @app.route('/', methods=['GET'])
@@ -52,23 +58,21 @@ def predict():
         
         # 1. Extract Features & Predict
         triage = get_model()
-        features = triage.extract_features(temp_path)
         
-        # Use trained classifier if available
-        if triage.classifier:
-            # predict_proba returns [P(class 0), P(category 1)]
-            # Category 1 is 'glaucoma' in our training script
-            prob = float(triage.classifier.predict_proba([features])[0][1])
-        else:
-            # Fallback for demo if not trained
-            prob = float(np.mean(np.abs(features)) * 10) % 1.0
-            if prob > 0.8: prob = 0.85
-        
-        # 2. Generate Heatmap (XAI)
-        heatmap = triage.get_attention_map(temp_path)
+        with torch.no_grad():
+            features = triage.extract_features(temp_path)
+            
+            # Use trained classifier if available
+            if triage.classifier:
+                prob = float(triage.classifier.predict_proba([features])[0][1])
+            else:
+                prob = float(np.mean(np.abs(features)) * 10) % 1.0
+                if prob > 0.8: prob = 0.85
+            
+            # 2. Generate Heatmap (XAI)
+            heatmap = triage.get_attention_map(temp_path)
         
         # Convert heatmap to base64
-        # Normalize heatmap for display
         heatmap_norm = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
         heatmap_color = cv2.applyColorMap((heatmap_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
         
@@ -93,6 +97,8 @@ def predict():
         }
         
         os.remove(temp_path)
+        # Final cleanup for memory
+        gc.collect()
         return jsonify(metrics)
         
     except Exception as e:
@@ -100,4 +106,7 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Disable debug mode and reloader for production (Render)
+    # Debug mode uses significantly more memory
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
