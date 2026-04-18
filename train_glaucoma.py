@@ -21,13 +21,24 @@ class GlaucomaTriageModel:
         print(f"Loading {DINOV2_MODEL}...")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Robust loading to handle GitHub rate limits on shared hosting (Render)
+        # Completely bypass GitHub API to avoid 'Authorization' (rate limit) errors on Render
         try:
-            self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True).to(self.device)
+            # Attempt to load using the torch.hub.load with source='github' but forcing no API check
+            # if possible, otherwise we manually download or use a direct torch.load if we had the weights.
+            # However, the most reliable way to bypass the 'Authorization' error is to 
+            # ensure we don't trigger the GitHub API request for the version check.
+            self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True, skip_validation=True).to(self.device)
         except Exception as e:
-            print(f"Primary load failed, trying offline mode: {e}")
-            # Try to load from local cache if GitHub API is rate-limiting
-            self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True, source='local').to(self.device)
+            print(f"Primary load failed: {e}. Trying absolute offline fallback...")
+            # If the above still fails due to GitHub API, we try to load from the local cache directory directly
+            # by pointing to the hub folder
+            hub_dir = torch.hub.get_dir()
+            model_dir = os.path.join(hub_dir, 'facebookresearch_dinov2_main')
+            if os.path.exists(model_dir):
+                self.model = torch.hub.load(model_dir, DINOV2_MODEL, source='local', trust_repo=True).to(self.device)
+            else:
+                # Last resort: try loading without validation
+                self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True, force_reload=False).to(self.device)
             
         self.model.eval()
         
