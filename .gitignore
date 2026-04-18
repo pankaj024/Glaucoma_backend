@@ -1,0 +1,19 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.cache
+.pytest_cache
+
+# Data & Models
+data/
+glaucoma_classifier.pkl
+temp_predict.jpg
+
+# OS
+.DS_Store
+Thumbs.db
