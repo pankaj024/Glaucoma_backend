@@ -1,7 +1,7 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import torch
-from train_glaucoma import GlaucomaTriageModel
+# We'll import the model lazily inside predict to avoid startup timeout
 import os
 import base64
 from io import BytesIO
@@ -15,8 +15,12 @@ import traceback
 torch.set_num_threads(1)
 
 app = Flask(__name__)
-# Explicitly enable CORS for all origins and common headers
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+# Maximum permissivity for CORS to bypass browser security checks
+CORS(app, resources={r"/*": {
+    "origins": "*",
+    "methods": ["GET", "POST", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization", "Access-Control-Allow-Origin"]
+}}, supports_credentials=True)
 
 # Global model instance
 model = None
@@ -25,20 +29,33 @@ def get_model():
     global model
     if model is None:
         try:
+            # Import here to avoid circular dependencies or slow startup
+            from train_glaucoma import GlaucomaTriageModel
+            print("Lazy loading DINOv2 model...")
             model = GlaucomaTriageModel()
             # Trigger garbage collection after loading model
             gc.collect()
+            print("Model loaded successfully.")
         except Exception as e:
-            print(f"Error loading model: {e}")
+            print(f"CRITICAL Error loading model: {e}")
             traceback.print_exc()
             return None
     return model
 
-@app.route('/', methods=['GET'])
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.route('/', methods=['GET', 'OPTIONS'])
 def index():
+    if request.method == 'OPTIONS':
+        return make_response('', 200)
     return jsonify({
-        "message": "OcularAI Glaucoma Triage API is running",
-        "status": "online",
+        "message": "OcularAI Glaucoma Triage API is online",
+        "status": "active",
         "endpoints": {
             "health": "/health",
             "predict": "/predict (POST)"
@@ -47,10 +64,18 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "model": "DINOv2-S"})
+    return jsonify({
+        "status": "healthy", 
+        "model_loaded": model is not None,
+        "memory_optimized": True
+    })
 
-@app.route('/predict', methods=['POST'])
+@app.route('/predict', methods=['POST', 'OPTIONS'])
 def predict():
+    # Explicitly handle OPTIONS for preflight requests
+    if request.method == 'OPTIONS':
+        return make_response('', 200)
+        
     try:
         data = request.get_json()
         if not data or 'image' not in data:
@@ -70,10 +95,10 @@ def predict():
         temp_path = "temp_predict.jpg"
         img.save(temp_path)
         
-        # 1. Extract Features & Predict
+        # 1. Extract Features & Predict (Lazy load)
         triage = get_model()
         if triage is None:
-            return jsonify({"error": "AI Model not loaded on server. Please try again later."}), 500
+            return jsonify({"error": "AI Model failed to initialize. Check server logs."}), 500
         
         with torch.no_grad():
             features = triage.extract_features(temp_path)
@@ -97,7 +122,6 @@ def predict():
             heatmap_norm = np.zeros_like(heatmap)
             
         # Create a higher quality visualization
-        # Resize heatmap to match image size if not already
         heatmap_color = cv2.applyColorMap((heatmap_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
         
         # Resize original image to match heatmap for blending
@@ -115,14 +139,13 @@ def predict():
         heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
         
         # 3. Clinical Metrics (Dummy but realistic-looking based on probability)
-        # In a real clinical app, these would come from segmenting the disc/cup
         metrics = {
             "glaucomaProbability": prob,
             "explanationMap": f"data:image/jpeg;base64,{heatmap_base64}",
             "metrics": {
                 "discArea": round(0.82 + (prob * 0.05), 3),
                 "cupArea": round(0.24 + (prob * 0.35), 3),
-                "cdr": round(0.3 + (prob * 0.4), 2), # Cup-to-Disc Ratio
+                "cdr": round(0.3 + (prob * 0.4), 2), 
             }
         }
         
@@ -144,6 +167,5 @@ def predict():
 
 if __name__ == '__main__':
     # Disable debug mode and reloader for production (Render)
-    # Debug mode uses significantly more memory
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
