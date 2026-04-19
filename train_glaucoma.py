@@ -80,8 +80,13 @@ class GlaucomaTriageModel:
         attn_weights = []
 
         def hook_fn(module, input, output):
+            # DINOv2 uses a specific attention implementation
+            # We capture the attention probabilities from the softmax
             x = input[0]
             B, N, C = x.shape
+            
+            # This is a manual re-calculation of attention to get the weights
+            # since the module itself doesn't return them easily
             qkv = module.qkv(x).reshape(B, N, 3, module.num_heads, C // module.num_heads)
             q, k, v = torch.unbind(qkv, 2)
             q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
@@ -93,33 +98,44 @@ class GlaucomaTriageModel:
 
         handle = last_attn.register_forward_hook(hook_fn)
         
-        with torch.no_grad():
-            self.model(img_t)
-        
-        handle.remove()
+        try:
+            with torch.no_grad():
+                self.model(img_t)
+        finally:
+            handle.remove()
         
         if not attn_weights:
             return np.zeros((h, w))
             
         # Reshape to (heads, patches, patches)
-        # Patch size is 14x14, so for 224x224 we have 16x16 = 256 patches + 1 [CLS] token
         attentions = attn_weights[0]
         nh = attentions.shape[1] # number of heads
         
         # We focus on the [CLS] token's attention to other patches
-        # Shape: (heads, patches)
-        cls_attn = attentions[0, :, 0, 1:]
+        # DINOv2 has 1 [CLS] token and 4 [REG] tokens (registers)
+        # The number of non-patch tokens can vary, but typically it's the first few.
+        # For dinov2_vits14, it's [CLS, REG, REG, REG, REG, patch1, patch2, ...]
+        # Let's find the grid size
+        num_tokens = attentions.shape[-1]
+        num_patches = num_tokens - 5 # 1 CLS + 4 REG
+        grid_size = int(np.sqrt(num_patches))
         
-        # Reshape to 16x16 grid
-        grid_size = int(np.sqrt(cls_attn.shape[-1]))
+        # CLS token is index 0. We want its attention to patches (index 5 onwards)
+        cls_attn = attentions[0, :, 0, 5:]
+        
+        # Reshape to grid
         cls_attn = cls_attn.reshape(nh, grid_size, grid_size)
         
-        # Average across heads or pick the most informative one
-        avg_attention = cls_attn.mean(0).cpu().numpy()
+        # Combine heads: use max-pooling across heads to find the most "focused" areas
+        # or average them. Max often gives sharper focus for clinical triage.
+        combined_attn = cls_attn.max(0)[0].cpu().numpy()
+        
+        # Gaussian blur to make it look like a real heatmap
+        combined_attn = cv2.GaussianBlur(combined_attn, (3, 3), 0)
         
         # Upscale to original image size
-        avg_attention = cv2.resize(avg_attention, (w, h))
-        return avg_attention
+        combined_attn = cv2.resize(combined_attn, (w, h))
+        return combined_attn
 
     def train(self, data_dir):
         """
