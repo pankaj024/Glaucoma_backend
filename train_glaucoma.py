@@ -23,23 +23,19 @@ class GlaucomaTriageModel:
         
         # Completely bypass GitHub API to avoid 'Authorization' (rate limit) errors on Render
         try:
-            # Attempt to load using the torch.hub.load with source='github' but forcing no API check
-            # if possible, otherwise we manually download or use a direct torch.load if we had the weights.
-            # However, the most reliable way to bypass the 'Authorization' error is to 
-            # ensure we don't trigger the GitHub API request for the version check.
             self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True, skip_validation=True).to(self.device)
         except Exception as e:
             print(f"Primary load failed: {e}. Trying absolute offline fallback...")
-            # If the above still fails due to GitHub API, we try to load from the local cache directory directly
-            # by pointing to the hub folder
             hub_dir = torch.hub.get_dir()
             model_dir = os.path.join(hub_dir, 'facebookresearch_dinov2_main')
             if os.path.exists(model_dir):
                 self.model = torch.hub.load(model_dir, DINOV2_MODEL, source='local', trust_repo=True).to(self.device)
             else:
-                # Last resort: try loading without validation
                 self.model = torch.hub.load('facebookresearch/dinov2', DINOV2_MODEL, trust_repo=True, force_reload=False).to(self.device)
             
+        # Optimization: Use Half-precision (FP16) to reduce memory footprint by 50%
+        # This is critical for Render's 512MB RAM limit
+        self.model.half()
         self.model.eval()
         
         self.transform = transforms.Compose([
@@ -60,10 +56,12 @@ class GlaucomaTriageModel:
     def extract_features(self, image_path):
         img = Image.open(image_path).convert('RGB')
         img_t = self.transform(img).unsqueeze(0).to(self.device)
+        # Match the half precision of the model
+        img_t = img_t.half()
         
-        with torch.no_grad():
+        with torch.inference_mode(): # More efficient than no_grad
             features = self.model(img_t)
-        return features.cpu().numpy().flatten()
+        return features.cpu().numpy().flatten().astype(np.float32)
 
     def get_attention_map(self, image_path):
         """
@@ -73,20 +71,17 @@ class GlaucomaTriageModel:
         img = Image.open(image_path).convert('RGB')
         w, h = img.size
         img_t = self.transform(img).unsqueeze(0).to(self.device)
+        img_t = img_t.half() # Match model precision
         
         # Get attention weights using a hook
-        # DINOv2 ViT hub model doesn't have get_last_selfattention
         last_attn = self.model.blocks[-1].attn
         attn_weights = []
 
         def hook_fn(module, input, output):
-            # DINOv2 uses a specific attention implementation
-            # We capture the attention probabilities from the softmax
             x = input[0]
             B, N, C = x.shape
             
-            # This is a manual re-calculation of attention to get the weights
-            # since the module itself doesn't return them easily
+            # Manual re-calculation to get weights
             qkv = module.qkv(x).reshape(B, N, 3, module.num_heads, C // module.num_heads)
             q, k, v = torch.unbind(qkv, 2)
             q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
@@ -99,7 +94,7 @@ class GlaucomaTriageModel:
         handle = last_attn.register_forward_hook(hook_fn)
         
         try:
-            with torch.no_grad():
+            with torch.inference_mode(): # Memory efficient
                 self.model(img_t)
         finally:
             handle.remove()

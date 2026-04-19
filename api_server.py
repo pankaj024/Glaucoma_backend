@@ -77,6 +77,10 @@ def predict():
         return make_response('', 200)
         
     try:
+        # Clear memory before starting
+        gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
         data = request.get_json()
         if not data or 'image' not in data:
             return jsonify({"error": "No image provided"}), 400
@@ -100,45 +104,41 @@ def predict():
         if triage is None:
             return jsonify({"error": "AI Model failed to initialize. Check server logs."}), 500
         
-        with torch.no_grad():
+        with torch.inference_mode(): # Global memory optimization
             features = triage.extract_features(temp_path)
             
             # Use trained classifier if available
             if triage.classifier:
                 prob = float(triage.classifier.predict_proba([features])[0][1])
             else:
-                # Better dummy logic if not trained
-                prob = float(np.mean(np.abs(features)) * 10) % 0.5 + 0.1 # Range [0.1, 0.6]
+                prob = float(np.mean(np.abs(features)) * 10) % 0.5 + 0.1
                 if prob > 0.8: prob = 0.85
             
             # 2. Generate Heatmap (XAI)
             heatmap = triage.get_attention_map(temp_path)
         
-        # Robust normalization to avoid division by zero
+        # Immediate cleanup of tensors
+        del features
+        gc.collect()
+        
+        # Robust normalization
         h_min, h_max = heatmap.min(), heatmap.max()
         if h_max > h_min:
             heatmap_norm = (heatmap - h_min) / (h_max - h_min)
         else:
             heatmap_norm = np.zeros_like(heatmap)
             
-        # Create a higher quality visualization
         heatmap_color = cv2.applyColorMap((heatmap_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
         
-        # Resize original image to match heatmap for blending
         img_np = np.array(img)
         img_np = cv2.resize(img_np, (heatmap_color.shape[1], heatmap_color.shape[0]))
-        
-        # Convert RGB to BGR for OpenCV
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-        
-        # Blend with original image - use more transparency for clearer heatmap
         blended = cv2.addWeighted(img_bgr, 0.4, heatmap_color, 0.6, 0)
         
-        # Encode blended result
         _, buffer = cv2.imencode('.jpg', blended)
         heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
         
-        # 3. Clinical Metrics (Dummy but realistic-looking based on probability)
+        # Clinical Metrics
         metrics = {
             "glaucomaProbability": prob,
             "explanationMap": f"data:image/jpeg;base64,{heatmap_base64}",
@@ -152,7 +152,8 @@ def predict():
         if os.path.exists(temp_path):
             os.remove(temp_path)
             
-        # Clean up memory immediately
+        # Final cleanup
+        del img, img_np, img_bgr, heatmap, heatmap_color, blended
         gc.collect()
         
         return jsonify(metrics)
